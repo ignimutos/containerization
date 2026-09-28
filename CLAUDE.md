@@ -55,7 +55,7 @@ uv run python -m tooling.build build tg-signer --repo-root . --registry-user <re
 - 执行顺序：`uv sync --frozen` → `uv run pytest tests/build -q` → 直接调用 `tooling.build build --push`。
 - 密钥走 Infisical（OIDC），不在 GitHub secrets；见 `.github/workflows/build.yml` 的 `Load secrets from Infisical` 步骤与 README 对应章节。
 - 只回写 `version` 分支 `version.yml`。
-- rollout 前需要手工把 `version` 分支里的 `version.yml` 重置成 `{}`。
+- `version` 分支缺失时 CI 自动创建并写入初始 `{}`；分支已存在但残留旧状态时仍需手工把 `version.yml` 重置成 `{}`。
 - `TARGETS` 非空时，workflow 会把它拆成 `build` 的位置参数；否则 push 事件走 changed-files 选择逻辑。
 - Build 触发路径：`images/**`、`tooling/build/**`、`tests/build/**`、`pyproject.toml`、`uv.lock`；`.github/**` 被排除，见 `.github/workflows/build.yml:7`。
 

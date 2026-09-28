@@ -39,11 +39,27 @@ jobs:
       contents: write
       id-token: write
     steps:
+      # The version branch holds mutable build state and may not exist yet on a
+      # fresh remote, so create and push an empty state file when it is missing
+      # instead of failing the whole run in the checkout step.
       - name: Checkout version
-        uses: actions/checkout@v7
-        with:
-          path: version
-          ref: version
+        run: |
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote "$remote" 'refs/heads/version' | grep -q 'refs/heads/version$'; then
+            git clone --depth 1 --branch version "$remote" version
+            exit 0
+          fi
+
+          echo "version branch missing; initializing empty state"
+          mkdir -p version
+          git -C version init -b version
+          git -C version remote add origin "$remote"
+          printf '{}\n' > version/version.yml
+          git -C version add version.yml
+          git -C version -c user.name='github-actions[bot]' \
+            -c user.email='github-actions[bot]@users.noreply.github.com' \
+            commit -m 'chore: initialize version state'
+          git -C version push -u origin version
 
       - name: Checkout main
         uses: actions/checkout@v7

@@ -170,7 +170,7 @@ GitHub Actions 会在这些路径变化时触发：
 
 CI 流程：
 
-1. checkout `version` 分支到旁边目录
+1. checkout `version` 分支到旁边目录；分支不存在时由 CI 自动创建并写入初始 `{}`
 2. checkout `main`
 3. 通过 Infisical 拉取密钥（见下）
 4. `uv sync --frozen`
@@ -179,7 +179,7 @@ CI 流程：
 7. 调用 `uv run python -m tooling.build build ... --push`
 8. 只把构建状态写回 `version` 分支
 
-`version` 分支保存可变构建状态；`main` 不保存这类状态文件。切到这套新语义前，需要先手工把 `version` 分支里的 `version.yml` 重置成 `{}`，避免旧状态格式残留。
+`version` 分支保存可变构建状态；`main` 不保存这类状态文件。分支缺失时 CI 会以 `{}` 初始化后自行推送，无需手工建分支；若分支已存在但残留旧状态，仍需要手工把 `version.yml` 重置成 `{}`，避免旧状态格式导致错误跳过。
 
 ### CI 密钥：Infisical
 
