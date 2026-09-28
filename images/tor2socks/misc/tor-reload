@@ -1,0 +1,3 @@
+#!/bin/ash
+pid=$(pidof tor)
+kill -HUP $pid

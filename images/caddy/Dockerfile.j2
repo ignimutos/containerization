@@ -1,0 +1,45 @@
+{# 模板上下文: `repos` = 该 target 在 config.yml 里 sha.github_sha.repos 的原列表,
+   `version` = 解析出的 caddy 版本。
+
+   `github.com/<repo>` 是多数模块的 `--with` 路径, 但上游仓库不一定等于 xcaddy
+   期望的模块路径, 少数几个在这里按 repo 列出映射。 #}
+{%- set module_overrides = {"klzgrad/naiveproxy": "github.com/caddyserver/forwardproxy=github.com/klzgrad/forwardproxy@naive"} -%}
+# syntax=docker/dockerfile:1.7
+ARG VERSION={{ version }}
+
+
+# 插件列表由 target 的 repos 决定, 所以各 target 共用同一个 builder stage,
+# 不需要再按插件分叉出多个 builder。
+FROM caddy:${VERSION}-builder-alpine AS builder
+
+RUN --mount=type=cache,target=/go/pkg/mod,id=containerization-caddy-go-mod \
+    --mount=type=cache,target=/root/.cache/go-build,id=containerization-caddy-go-build \
+    xcaddy build{% for repo in repos %} \
+      --with {{ module_overrides.get(repo, "github.com/" ~ repo) }}{% endfor %}
+
+
+FROM caddy:${VERSION}-alpine AS runtime-base
+
+ENV TZ=Asia/Shanghai
+
+RUN apk add --no-cache tzdata
+
+COPY ./misc/* /usr/bin
+RUN chmod +x /usr/bin/caddy-*
+
+VOLUME [ "/data/caddy" ]
+
+EXPOSE 80 443
+
+ENTRYPOINT [ "caddy" ]
+CMD [ "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile" ]
+
+
+
+FROM runtime-base AS caddy-base
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+RUN chmod +x /usr/bin/caddy
+
+FROM runtime-base AS caddy-naive
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+RUN chmod +x /usr/bin/caddy

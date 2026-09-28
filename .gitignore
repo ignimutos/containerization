@@ -1,0 +1,8 @@
+.claude/worktrees
+.env
+.firecrawl/
+.pytest_cache/
+.venv
+__pycache__/
+containerization_build.egg-info
+*.fish

@@ -1,0 +1,14 @@
+#!/bin/ash
+if [ "$OBFS_IPV6" = "true" ]; then
+  OBFS_IPV6="yes"
+else
+  OBFS_IPV6="no"
+fi
+file=$(mktemp)
+status=$(curl -sSL -w "%{http_code}" "https://bridges.torproject.org/bridges?transport=obfs4&ipv6=$OBFS_IPV6" -o "$file")
+
+if [ $? -eq 0 ] && [ "$status" -eq 200 ]; then
+  grep -oE 'obfs4 [^[:space:]]+ [^[:space:]]+ cert=[^[:space:]]+ iat-mode=[0-9]' "$file" | sed 's/&#43;/+/' | awk '{ print "Bridge " $0 }' >/etc/torrc.d/bridges.conf
+else
+  echo >&2 "Failed to get bridges: $status"
+fi

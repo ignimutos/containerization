@@ -1,0 +1,3 @@
+#!/bin/ash
+caddy-fmt
+caddy adapt --config /etc/caddy/Caddyfile --pretty

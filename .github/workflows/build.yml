@@ -1,0 +1,179 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Build args for tooling.build build"
+        required: false
+        type: string
+      force:
+        description: "Force rebuild selected targets"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "47 7 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - "images/**"
+      - "tooling/build/**"
+      - "tests/build/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "!.github/**"
+
+env:
+  TZ: ${{ vars.TZ || 'Asia/Shanghai' }}
+  GITHUB_TOKEN: ${{ github.token }}
+  PLATFORM: ${{ vars.PLATFORM || 'linux/amd64' }}
+  TARGETS: ${{ vars.TARGETS || '' }}
+  BUILD_REPORT_FILE: .tmp/build-report.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout version
+        uses: actions/checkout@v7
+        with:
+          path: version
+          ref: version
+
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          path: main
+          ref: main
+          submodules: true
+
+      # Secrets come from Infisical, not GitHub. Requires an OIDC machine
+      # identity bound to repo:ignimutos/Containerization; the action exports
+      # DOCKERHUB_USER / DOCKERHUB_TOKEN / TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+      # as job-level environment variables.
+      - name: Load secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: oidc
+          identity-id: ${{ secrets.INFISICAL_IDENTITY_ID }}
+          project-slug: ${{ secrets.INFISICAL_PROJECT_SLUG }}
+          env-slug: ${{ secrets.INFISICAL_ENV_SLUG || 'dev' }}
+          domain: ${{ secrets.INFISICAL_DOMAIN || 'https://app.infisical.com' }}
+          secret-path: ${{ secrets.INFISICAL_SECRET_PATH || '/project/containerization' }}
+          recursive: ${{ secrets.INFISICAL_RECURSIVE || 'false' }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+
+      - name: Sync Python dependencies
+        working-directory: main
+        run: uv sync --frozen
+
+      - name: Run Python tests
+        working-directory: main
+        run: uv run pytest tests/build -q
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.REGISTRY || 'docker.io' }}
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.4.0
+        with:
+          # Reusing the runner's cached binfmt image fails to restore and only
+          # logs a warning before falling back to `docker pull`. Pull directly.
+          cache-image: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Get changed files
+        if: github.event_name == 'push'
+        id: changed-files
+        uses: tj-actions/changed-files@v47.0.6
+        with:
+          path: main
+          files: |
+            images/**
+            tooling/build/**
+            tests/build/**
+            pyproject.toml
+            uv.lock
+
+      - name: Build selected targets
+        working-directory: main
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          INPUT_TARGETS: ${{ github.event.inputs.targets || '' }}
+          INPUT_FORCE: ${{ github.event.inputs.force || 'false' }}
+        run: |
+          mkdir -p .tmp
+
+          args=()
+          if [[ "${{ github.event_name }}" == 'workflow_dispatch' ]]; then
+            raw_targets="$INPUT_TARGETS"
+          else
+            raw_targets="$TARGETS"
+          fi
+
+          if [[ -n "$raw_targets" ]]; then
+            while IFS= read -r token; do
+              [[ -n "$token" ]] || continue
+              args+=("$token")
+            done < <(RAW_TARGETS="$raw_targets" python -c 'import os, re; raw = os.environ.get("RAW_TARGETS", ""); print(*filter(None, re.split(r"[\s,]+", raw.strip())), sep="\n")')
+          elif [[ "${{ github.event_name }}" == 'push' ]]; then
+            for file in $CHANGED_FILES; do
+              [[ -n "$file" ]] || continue
+              args+=(--changed-file "$file")
+            done
+          fi
+
+          if [[ "$INPUT_FORCE" == 'true' ]]; then
+            args+=(--force)
+          fi
+
+          uv run python -m tooling.build build --repo-root . --registry-user "$DOCKERHUB_USER" --state-file ../version/version.yml --push --platform "$PLATFORM" --report-file "$BUILD_REPORT_FILE" "${args[@]}"
+
+      - name: Sync Docker Hub READMEs
+        working-directory: main
+        run: |
+          uv run python -m tooling.build sync-readmes --report-file "$BUILD_REPORT_FILE" --repo-root . --dockerhub-namespace "$DOCKERHUB_USER" --dockerhub-username "$DOCKERHUB_USER" --dockerhub-password "$DOCKERHUB_TOKEN"
+
+      - name: Send Telegram success summary
+        if: success() && hashFiles('main/.tmp/build-report.json') != ''
+        working-directory: main
+        run: |
+          uv run python -m tooling.build send-telegram --report-file "$BUILD_REPORT_FILE" --bot-token "$TELEGRAM_BOT_TOKEN" --chat-id "$TELEGRAM_CHAT_ID" --template success
+
+      - name: Send Telegram failure summary
+        if: failure() && hashFiles('main/.tmp/build-report.json') != ''
+        working-directory: main
+        run: |
+          uv run python -m tooling.build send-telegram --report-file "$BUILD_REPORT_FILE" --bot-token "$TELEGRAM_BOT_TOKEN" --chat-id "$TELEGRAM_CHAT_ID" --template failure
+
+      - name: Write build summary
+        if: always() && hashFiles('main/.tmp/build-report.json') != ''
+        working-directory: main
+        run: |
+          uv run python -m tooling.build write-summary --report-file "$BUILD_REPORT_FILE" --github-step-summary "$GITHUB_STEP_SUMMARY" --format markdown
+
+      - name: Update version branch state
+        working-directory: version
+        run: |
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "Nothing update"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.yml
+          git commit -m "chore: bump version"
+          git push origin version

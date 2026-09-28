@@ -1,0 +1,26 @@
+version:
+  docker_hub_tag:
+    namespace: library
+    repository: caddy
+    regex: ^(\d+\.\d+\.\d+)-builder-alpine$
+targets:
+  - target: caddy-base
+    sha:
+      github_sha:
+        repos:
+          - caddy-dns/cloudflare
+          - caddyserver/transform-encoder
+          - greenpau/caddy-trace
+          - mholt/caddy-l4
+          - caddyserver/replace-response
+  - name: naive
+    target: caddy-naive
+    sha:
+      github_sha:
+        repos:
+          - caddy-dns/cloudflare
+          - caddyserver/transform-encoder
+          - greenpau/caddy-trace
+          - mholt/caddy-l4
+          - caddyserver/replace-response
+          - klzgrad/naiveproxy

@@ -1,0 +1,4 @@
+targets:
+  - version:
+      github_tag:
+        repo: nezhahq/agent
