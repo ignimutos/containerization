@@ -1,6 +1,6 @@
 caddy:
   default:
-    version: 2.11.6
+    version: 2.11.7
     components:
       caddy-dns/cloudflare: a8737d095ad5a48ca031cea6ab704057dbc2d250
       caddyserver/transform-encoder: ba4124974830222da7f12a091cf11ddf4d49363f
@@ -8,23 +8,23 @@ caddy:
       mholt/caddy-l4: 42db5690dea199f930a6f08005fe2e4aab10dcc9
       caddyserver/replace-response: 80962887e4c680abfd1b11ce1403fa8cc0fdd3d6
   naive:
-    version: 2.11.6
+    version: 2.11.7
     components:
       caddy-dns/cloudflare: a8737d095ad5a48ca031cea6ab704057dbc2d250
       caddyserver/transform-encoder: ba4124974830222da7f12a091cf11ddf4d49363f
       greenpau/caddy-trace: b849748ae8ff2e3a1c2c92b382cdc73f3d94dca0
       mholt/caddy-l4: 42db5690dea199f930a6f08005fe2e4aab10dcc9
       caddyserver/replace-response: 80962887e4c680abfd1b11ce1403fa8cc0fdd3d6
-      klzgrad/naiveproxy: d6ba2a2e55416294bca1ae87499bfb31d94ccd4d
+      klzgrad/naiveproxy: 00e07251fbb72bee16ab4384dd2043b8e4258192
 naive-client:
   default:
-    version: 154.0.8037.49-2
+    version: 154.0.8037.49-3
     components: {}
 naive-server:
   default:
-    version: 2.11.6
+    version: 2.11.7
     components:
-      klzgrad/forwardproxy: d62c80d3dd2c706b6b87579844d2397bddd18317
+      klzgrad/forwardproxy: c096d6a00cb28e019cc1995b04bdc6a9311d8024
 nezha-agent:
   default:
     version: 2.3.5
