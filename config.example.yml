@@ -1,0 +1,11 @@
+version:
+  docker_hub_tag:
+    namespace: library
+    repository: caddy
+    regex: ^(\d+\.\d+\.\d+)-builder-alpine$
+targets:
+  - sha: |
+      github_sha caddy-dns/cloudflare
+  - name: rr
+    sha: |
+      github_sha caddy-dns/cloudflare caddyserver/transform-encoder

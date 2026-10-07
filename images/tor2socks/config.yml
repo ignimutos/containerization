@@ -1,0 +1,13 @@
+version:
+  alpine_pkg:
+    package: tor
+    branch: edge
+    repository: community
+targets:
+  - {}
+  - name: obfs
+    sha:
+      alpine_pkg:
+        package: lyrebird
+        branch: edge
+        repository: community

@@ -1,0 +1,4 @@
+HardwareAccel 1
+DataDirectory /var/lib/tor
+%include /etc/torrc.d/*
+BridgeRelay 0

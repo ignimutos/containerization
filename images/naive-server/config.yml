@@ -1,0 +1,10 @@
+targets:
+  - version:
+      docker_hub_tag:
+        namespace: library
+        repository: caddy
+        regex: ^(\d+\.\d+\.\d+)-builder-alpine$
+    sha:
+      github_sha:
+        repos:
+          - klzgrad/forwardproxy
