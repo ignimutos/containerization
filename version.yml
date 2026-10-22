@@ -27,7 +27,7 @@ naive-server:
       klzgrad/forwardproxy: c096d6a00cb28e019cc1995b04bdc6a9311d8024
 nezha-agent:
   default:
-    version: 2.3.5
+    version: 2.4.0
     components: {}
 tg-signer:
   default:
