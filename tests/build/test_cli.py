@@ -2188,6 +2188,10 @@ def test_send_telegram_command_sends_success_message(
             sent_messages.append({"chat_id": chat_id, "text": text})
 
     monkeypatch.setattr(cli_module, "TelegramClient", FakeTelegramClient)
+    # CI sets these, and the message then carries a run link. Clear them so the
+    # expected text does not depend on where the test runs.
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
 
     exit_code = main(
         [
