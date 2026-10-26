@@ -7,6 +7,8 @@ from tooling.build.reporting import (
     SummaryModel,
     build_summary_model,
     format_telegram_summary,
+    record_failure,
+    render_build_telegram,
     render_failure_summary_markdown,
     render_failure_summary_telegram_html,
     render_summary_markdown,
@@ -231,11 +233,13 @@ def test_render_failure_summary_markdown_renders_failure_details() -> None:
 
     assert summary.splitlines() == [
         "Build failed",
+        "",
+        "### caddy/naive",
         "Stage: build",
-        "Target: caddy/naive",
         "Message: docker build failed",
         "Exit code: 1",
         "Command: docker buildx build ...",
+        "",
         "Successful entries: 1",
     ]
 
@@ -266,11 +270,15 @@ def test_render_failure_summary_telegram_html_renders_failure_details_with_escap
 
     assert summary.splitlines() == [
         "Build failed",
+        "Failures: 1",
+        "",
+        "<blockquote expandable><b>ca&amp;ddy/na&quot;ive</b>",
         "Stage: bu&lt;ild&gt;",
-        "Target: ca&amp;ddy/na&quot;ive",
         "Message: docker &lt;build&gt; failed &amp; retry",
         "Exit code: 1",
         "Command: docker buildx build --label &quot;a&amp;b&quot; &lt;ctx&gt;",
+        "</blockquote>",
+        "",
         "Successful entries: 1",
     ]
 
@@ -282,8 +290,9 @@ def test_render_failure_summary_telegram_html_renders_failure_details_with_escap
             render_failure_summary_markdown,
             [
                 "Build failed",
+                "",
+                "### N/A",
                 "Stage: N/A",
-                "Target: N/A",
                 "Message: N/A",
             ],
         ),
@@ -291,9 +300,12 @@ def test_render_failure_summary_telegram_html_renders_failure_details_with_escap
             render_failure_summary_telegram_html,
             [
                 "Build failed",
+                "Failures: 1",
+                "",
+                "<blockquote expandable><b>N/A</b>",
                 "Stage: N/A",
-                "Target: N/A",
                 "Message: N/A",
+                "</blockquote>",
             ],
         ),
     ],
@@ -314,8 +326,9 @@ def test_render_failure_summary_handles_non_mapping_failure_metadata(
             render_failure_summary_markdown,
             [
                 "Build failed",
+                "",
+                "### N/A",
                 "Stage: build",
-                "Target: N/A",
                 "Message: N/A",
             ],
         ),
@@ -323,9 +336,12 @@ def test_render_failure_summary_handles_non_mapping_failure_metadata(
             render_failure_summary_telegram_html,
             [
                 "Build failed",
+                "Failures: 1",
+                "",
+                "<blockquote expandable><b>N/A</b>",
                 "Stage: build",
-                "Target: N/A",
                 "Message: N/A",
+                "</blockquote>",
             ],
         ),
     ],
@@ -352,8 +368,88 @@ def test_render_failure_summary_target_with_single_side_present(
 ) -> None:
     report = BuildReport(metadata={"result": "failure", "failure": failure})
 
-    assert render_failure_summary_markdown(report).splitlines()[2] == f"Target: {expected_target}"
-    assert render_failure_summary_telegram_html(report).splitlines()[2] == f"Target: {expected_target}"
+    assert render_failure_summary_markdown(report).splitlines()[2] == f"### {expected_target}"
+    assert (
+        render_failure_summary_telegram_html(report).splitlines()[3]
+        == f"<blockquote expandable><b>{expected_target}</b>"
+    )
+
+
+def test_render_build_telegram_lists_every_failure_and_the_run_link() -> None:
+    report = BuildReport(
+        metadata={
+            "result": "failure",
+            "failures": [
+                {"stage": "build", "image_name": "caddy", "message": "docker failed"},
+                {"stage": "resolve", "image_name": "naive", "message": "lookup failed"},
+            ],
+        }
+    )
+
+    message = render_build_telegram(
+        report,
+        status="failure",
+        run_url="https://github.com/ignimutos/Containerization/actions/runs/7",
+    )
+
+    assert message.splitlines()[0] == "<b>Build failure</b>"
+    assert "Failures: 2" in message
+    assert "<b>caddy</b>" in message
+    assert "<b>naive</b>" in message
+    assert 'href="https://github.com/ignimutos/Containerization/actions/runs/7"' in message
+
+
+def test_render_build_telegram_degrades_when_the_report_is_missing() -> None:
+    message = render_build_telegram(None, status="failure")
+
+    assert message == "<b>Build failure</b>\nReport: unavailable"
+
+
+def test_render_build_telegram_falls_back_to_the_report_result() -> None:
+    report = BuildReport(metadata={"result": "success"})
+
+    message = render_build_telegram(report)
+
+    assert message.splitlines()[0] == "<b>Build success</b>"
+
+
+def test_record_failure_appends_and_marks_the_report() -> None:
+    report = BuildReport()
+
+    record_failure(
+        report,
+        stage="build",
+        image_name="caddy",
+        target_name="naive",
+        message="docker build failed",
+        exit_code=2,
+        command="docker build .",
+    )
+    record_failure(
+        report,
+        stage="resolve",
+        image_name="tg-signer",
+        target_name=None,
+        message="lookup failed",
+    )
+
+    assert report.metadata["result"] == "failure"
+    assert report.metadata["failures"] == [
+        {
+            "stage": "build",
+            "image_name": "caddy",
+            "target_name": "naive",
+            "message": "docker build failed",
+            "exit_code": 2,
+            "command": "docker build .",
+        },
+        {
+            "stage": "resolve",
+            "image_name": "tg-signer",
+            "target_name": None,
+            "message": "lookup failed",
+        },
+    ]
 
 
 def test_build_report_entry_from_dict_requires_image_key() -> None:

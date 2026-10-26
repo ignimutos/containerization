@@ -30,6 +30,9 @@ env:
   GITHUB_TOKEN: ${{ github.token }}
   PLATFORM: ${{ vars.PLATFORM || 'linux/amd64' }}
   TARGETS: ${{ vars.TARGETS || '' }}
+  # One broken target must not stop the rest from being built. The run still
+  # fails when anything failed. Only the early exit is gone.
+  IGNORE_FAILURE: ${{ vars.IGNORE_FAILURE || 'true' }}
   BUILD_REPORT_FILE: .tmp/build-report.json
   # Non-sensitive identifiers, so they live in Variables rather than Secrets:
   # GitHub masks a secret's value everywhere it appears, while a variable is
@@ -187,24 +190,31 @@ jobs:
             args+=(--force)
           fi
 
+          if [[ "$IGNORE_FAILURE" == 'true' ]]; then
+            args+=(--ignore-failure)
+          fi
+
           uv run python -m tooling.build build --repo-root . --registry-user "$DOCKERHUB_USER" --state-file ../version/version.yml --push --platform "$PLATFORM" --report-file "$BUILD_REPORT_FILE" "${args[@]}"
 
+      # A build that partly failed still produced images for the targets that
+      # succeeded, and the report names those. `if: always()` keeps it running
+      # after a failed build step.
       - name: Sync Docker Hub READMEs
+        if: always() && hashFiles('main/.tmp/build-report.json') != ''
         working-directory: main
         run: |
           uv run python -m tooling.build sync-readmes --report-file "$BUILD_REPORT_FILE" --repo-root . --dockerhub-namespace "$DOCKERHUB_USER" --dockerhub-username "$DOCKERHUB_USER" --dockerhub-password "$DOCKERHUB_TOKEN"
 
-      - name: Send Telegram success summary
-        if: success() && hashFiles('main/.tmp/build-report.json') != ''
+      # One notification for every outcome. `always()` is what lets a failure
+      # tell someone. The step also runs before the build wrote a report, so it
+      # degrades to the status and the run link. Missing credentials skip it.
+      - name: Send Telegram summary
+        if: always()
         working-directory: main
+        env:
+          STATUS: ${{ job.status }}
         run: |
-          uv run python -m tooling.build send-telegram --report-file "$BUILD_REPORT_FILE" --bot-token "$TELEGRAM_BOT_TOKEN" --chat-id "$TELEGRAM_CHAT_ID" --template success
-
-      - name: Send Telegram failure summary
-        if: failure() && hashFiles('main/.tmp/build-report.json') != ''
-        working-directory: main
-        run: |
-          uv run python -m tooling.build send-telegram --report-file "$BUILD_REPORT_FILE" --bot-token "$TELEGRAM_BOT_TOKEN" --chat-id "$TELEGRAM_CHAT_ID" --template failure
+          uv run python -m tooling.build send-telegram --report-file "$BUILD_REPORT_FILE" --bot-token "$TELEGRAM_BOT_TOKEN" --chat-id "$TELEGRAM_CHAT_ID" --status "$STATUS"
 
       - name: Write build summary
         if: always() && hashFiles('main/.tmp/build-report.json') != ''
@@ -212,7 +222,10 @@ jobs:
         run: |
           uv run python -m tooling.build write-summary --report-file "$BUILD_REPORT_FILE" --github-step-summary "$GITHUB_STEP_SUMMARY" --format markdown
 
+      # The CLI saves the state of every target that succeeded before it exits,
+      # so a run with a failed target still has something to record.
       - name: Update version branch state
+        if: always()
         working-directory: version
         run: |
           if [[ -z "$(git status --porcelain)" ]]; then

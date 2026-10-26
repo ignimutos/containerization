@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -346,65 +347,172 @@ def format_telegram_summary(report: BuildReport) -> str:
     return render_summary_telegram_html(build_summary_model(report))
 
 
-def render_failure_summary_markdown(report: BuildReport) -> str:
-    failure = _failure_metadata(report.metadata)
+def record_failure(
+    report: BuildReport,
+    *,
+    stage: str,
+    image_name: str,
+    target_name: str | None,
+    message: str,
+    exit_code: int | None = None,
+    command: str | None = None,
+) -> None:
+    """Append one failed target to the report and mark the run as failed.
 
-    image_name = _failure_text(failure.get("image_name"))
-    target_name = _failure_text(failure.get("target_name"))
-
-    lines = [
-        "Build failed",
-        f"Stage: {_safe_markdown(_failure_text(failure.get('stage')))}",
-        f"Target: {_safe_markdown(_failure_target(image_name, target_name))}",
-        f"Message: {_safe_markdown(_failure_text(failure.get('message')))}",
-    ]
-
-    exit_code = failure.get("exit_code")
+    Every failure path goes through here, so a run that keeps going after a
+    failed target still lists all of them instead of overwriting the first.
+    """
+    failure: dict[str, Any] = {
+        "stage": stage,
+        "image_name": image_name,
+        "target_name": target_name,
+        "message": message,
+    }
     if exit_code is not None:
-        lines.append(f"Exit code: {_safe_markdown(str(exit_code))}")
+        failure["exit_code"] = exit_code
+    if command:
+        failure["command"] = command
 
-    command = failure.get("command")
-    if command not in (None, ""):
-        lines.append(f"Command: {_safe_markdown(str(command))}")
+    failures = report.metadata.get("failures")
+    if not isinstance(failures, list):
+        failures = []
+    failures.append(failure)
+    report.metadata["failures"] = failures
+    report.metadata["result"] = "failure"
+
+
+def render_failure_summary_markdown(report: BuildReport) -> str:
+    lines = ["Build failed"]
+    for failure in _failures_or_unknown(report.metadata):
+        image_name = _failure_text(failure.get("image_name"))
+        target_name = _failure_text(failure.get("target_name"))
+        lines.append("")
+        lines.extend(
+            [
+                f"### {_safe_markdown(_failure_target(image_name, target_name))}",
+                f"Stage: {_safe_markdown(_failure_text(failure.get('stage')))}",
+                f"Message: {_safe_markdown(_failure_text(failure.get('message')))}",
+            ]
+        )
+
+        exit_code = failure.get("exit_code")
+        if exit_code is not None:
+            lines.append(f"Exit code: {_safe_markdown(str(exit_code))}")
+
+        command = failure.get("command")
+        if command not in (None, ""):
+            lines.append(f"Command: {_safe_markdown(str(command))}")
 
     if report.entries:
+        lines.append("")
         lines.append(f"Successful entries: {len(report.entries)}")
 
     return "\n".join(lines)
 
 
 def render_failure_summary_telegram_html(report: BuildReport) -> str:
-    failure = _failure_metadata(report.metadata)
-
-    image_name = _failure_text(failure.get("image_name"))
-    target_name = _failure_text(failure.get("target_name"))
-
-    lines = [
-        "Build failed",
-        f"Stage: {_safe_html(_failure_text(failure.get('stage')))}",
-        f"Target: {_safe_html(_failure_target(image_name, target_name))}",
-        f"Message: {_safe_html(_failure_text(failure.get('message')))}",
-    ]
-
-    exit_code = failure.get("exit_code")
-    if exit_code is not None:
-        lines.append(f"Exit code: {_safe_html(str(exit_code))}")
-
-    command = failure.get("command")
-    if command not in (None, ""):
-        lines.append(f"Command: {_safe_html(str(command))}")
+    failures = _failures_or_unknown(report.metadata)
+    lines = ["Build failed", f"Failures: {len(failures)}"]
+    lines.extend(_failure_blocks_telegram_html(failures))
 
     if report.entries:
+        lines.append("")
         lines.append(f"Successful entries: {len(report.entries)}")
 
     return "\n".join(lines)
 
 
-def _failure_metadata(metadata: Mapping[str, Any]) -> Mapping[str, Any]:
+def _failure_blocks_telegram_html(
+    failures: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    lines: list[str] = []
+    for failure in failures:
+        image_name = _failure_text(failure.get("image_name"))
+        target_name = _failure_text(failure.get("target_name"))
+        lines.append("")
+        lines.append(
+            "<blockquote expandable>"
+            f"<b>{_safe_html(_failure_target(image_name, target_name))}</b>"
+        )
+        lines.append(f"Stage: {_safe_html(_failure_text(failure.get('stage')))}")
+        lines.append(f"Message: {_safe_html(_failure_text(failure.get('message')))}")
+
+        exit_code = failure.get("exit_code")
+        if exit_code is not None:
+            lines.append(f"Exit code: {_safe_html(str(exit_code))}")
+
+        command = failure.get("command")
+        if command not in (None, ""):
+            lines.append(f"Command: {_safe_html(str(command))}")
+        lines.append("</blockquote>")
+    return lines
+
+
+def render_build_telegram(
+    report: BuildReport | None,
+    *,
+    status: str | None = None,
+    run_url: str | None = None,
+) -> str:
+    """The one Telegram message for a run, whatever state it ended in.
+
+    `status` comes from `job.status` in CI. When it is empty the report decides.
+    A missing or unreadable report still produces a message: the status and the
+    run link alone, so a run that failed before it wrote one is not silent.
+    """
+    effective_status = status or (
+        str(report.metadata.get("result", "")) if report is not None else ""
+    )
+    lines = [f"<b>{_safe_html(_status_label(effective_status))}</b>"]
+
+    if report is None:
+        lines.append("Report: unavailable")
+    else:
+        failures = _failures(report.metadata)
+        if failures:
+            lines.append("")
+            lines.append(f"Failures: {len(failures)}")
+            lines.extend(_failure_blocks_telegram_html(failures))
+        if report.entries:
+            lines.append("")
+            lines.append(render_summary_telegram_html(build_summary_model(report)))
+
+    if run_url:
+        lines.append("")
+        lines.append(f'Run: <a href="{_safe_html(run_url)}">{_safe_html(run_url)}</a>')
+
+    return "\n".join(lines)
+
+
+def _status_label(status: str) -> str:
+    return {
+        "success": "Build success",
+        "failure": "Build failure",
+        "cancelled": "Build cancelled",
+    }.get(status, "Build finished")
+
+
+def _failures(metadata: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Every failed target, tolerating the single `failure` older reports hold."""
+    raw_failures = metadata.get("failures")
+    if isinstance(raw_failures, list):
+        return [item for item in raw_failures if isinstance(item, Mapping)]
+
     failure = metadata.get("failure", {})
-    if isinstance(failure, Mapping):
-        return failure
-    return {}
+    if isinstance(failure, Mapping) and failure:
+        return [failure]
+    return []
+
+
+def _failures_or_unknown(
+    metadata: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    """The failures, or one all-`N/A` placeholder when the report names none.
+
+    A failed run whose report lost its detail still renders its shape, so a
+    reader sees that it failed rather than an empty section.
+    """
+    return _failures(metadata) or [{}]
 
 
 def _failure_text(value: Any) -> str:

@@ -10,10 +10,9 @@ from tooling.build.models import ResolvedTargetState
 from tooling.build.reporting import (
     BuildReport,
     build_summary_model,
+    render_build_telegram,
     render_failure_summary_markdown,
-    render_failure_summary_telegram_html,
     render_summary_markdown,
-    render_summary_telegram_html,
 )
 
 
@@ -927,15 +926,17 @@ def test_build_command_writes_failure_report_file_on_resolver_failure(
         "built_entries_count": 0,
         "force": False,
         "result": "failure",
-        "failure": {
-            "stage": "resolve",
-            "image_name": "tg-signer",
-            "target_name": "default",
-            "message": (
-                "GitHub tag lookup failed for amchii/tg-signer: "
-                "TLS connection failed (UNEXPECTED_EOF_WHILE_READING)"
-            ),
-        },
+        "failures": [
+            {
+                "stage": "resolve",
+                "image_name": "tg-signer",
+                "target_name": "default",
+                "message": (
+                    "GitHub tag lookup failed for amchii/tg-signer: "
+                    "TLS connection failed (UNEXPECTED_EOF_WHILE_READING)"
+                ),
+            }
+        ],
     }
 
 
@@ -1150,15 +1151,168 @@ def test_build_command_persists_partial_state_and_report_before_nonzero_return(
         "built_entries_count": 1,
         "force": False,
         "result": "failure",
-        "failure": {
-            "stage": "build",
-            "image_name": "tg-signer",
-            "target_name": "worker",
-            "message": "docker build failed",
-            "exit_code": 7,
-            "command": "docker build --load --build-arg VERSION=0.8.6 -t ignimutos/tg-signer:worker-latest -f Dockerfile .",
-        },
+        "failures": [
+            {
+                "stage": "build",
+                "image_name": "tg-signer",
+                "target_name": "worker",
+                "message": "docker build failed",
+                "exit_code": 7,
+                "command": "docker build --load --build-arg VERSION=0.8.6 -t ignimutos/tg-signer:worker-latest -f Dockerfile .",
+            }
+        ],
     }
+
+
+def test_build_command_ignore_failure_keeps_going_after_two_failures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tooling.build import cli as cli_module
+    BuildPlan = cli_module.BuildPlan
+
+    image_dir = tmp_path / "images" / "tg-signer"
+    image_dir.mkdir(parents=True)
+    (image_dir / "config.yml").write_text("targets: []\n")
+    report_file = tmp_path / "reports" / "build-report.json"
+
+    plans = [
+        BuildPlan(
+            image_dir=image_dir,
+            dockerfile="Dockerfile",
+            target=ResolvedTargetState(
+                image_name="tg-signer",
+                target_name="release",
+                version="0.8.5",
+                components={"sha": "sha1"},
+            ),
+        ),
+        BuildPlan(
+            image_dir=image_dir,
+            dockerfile="Dockerfile",
+            target=ResolvedTargetState(
+                image_name="tg-signer",
+                target_name="worker",
+                version="0.8.6",
+                components={"sha": "sha2"},
+            ),
+        ),
+    ]
+    monkeypatch.setattr(cli_module, "resolve_target_builds", lambda **_: plans)
+
+    built: list[str] = []
+
+    def fake_run_build(command: list[str], image_dir: Path, debug: bool = False) -> None:
+        built.append(command[-4])
+        raise cli_module.BuildError(command=command, returncode=3, output="boom\n")
+
+    monkeypatch.setattr(cli_module, "run_build", fake_run_build)
+
+    class FakeStore:
+        def __init__(self, state_file: Path | None) -> None:
+            self.saved = False
+
+        def get_state(self, *_args, **_kwargs):
+            return None
+
+        def record_success(self, *_args, **_kwargs) -> None:
+            pytest.fail("no target succeeded, so nothing should be recorded")
+
+        def save(self) -> None:
+            self.saved = True
+
+    store = FakeStore(None)
+    monkeypatch.setattr(cli_module, "BuildStateStore", lambda *_a, **_k: store)
+    monkeypatch.setattr(cli_module, "resolve_state_file", lambda *_a, **_k: tmp_path / "version.yml")
+
+    exit_code = main(
+        [
+            "build",
+            "tg-signer",
+            "--repo-root",
+            str(tmp_path),
+            "--registry-user",
+            "ignimutos",
+            "--report-file",
+            str(report_file),
+            "--ignore-failure",
+        ]
+    )
+
+    assert exit_code == 3
+    assert len(built) == 2
+    assert store.saved is True
+    payload = json.loads(report_file.read_text())
+    assert payload["metadata"]["result"] == "failure"
+    assert [item["target_name"] for item in payload["metadata"]["failures"]] == [
+        "release",
+        "worker",
+    ]
+    assert payload["entries"] == []
+
+
+def test_build_command_ignore_failure_continues_past_resolve_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tooling.build import cli as cli_module
+    from tooling.build.errors import BuildUserError
+
+    image_dir = tmp_path / "images" / "beta"
+    image_dir.mkdir(parents=True)
+    (image_dir / "config.yml").write_text("version: 2.0.0\n")
+    alpha_dir = tmp_path / "images" / "alpha"
+    alpha_dir.mkdir(parents=True)
+    (alpha_dir / "config.yml").write_text("version: 1.0.0\n")
+    report_file = tmp_path / "reports" / "build-report.json"
+
+    def fake_resolve(**kwargs):
+        assert kwargs["failures"] is not None
+        kwargs["failures"].append(
+            BuildUserError(
+                reason_code="github_tls_error",
+                message="tag lookup failed",
+                image_name="alpha",
+                target_name="default",
+            )
+        )
+        return [
+            cli_module.BuildPlan(
+                image_dir=image_dir,
+                dockerfile="Dockerfile",
+                target=ResolvedTargetState(image_name="beta", version="2.0.0"),
+                directory_name="beta",
+            )
+        ]
+
+    monkeypatch.setattr(cli_module, "resolve_target_builds", fake_resolve)
+    monkeypatch.setattr(cli_module, "run_build", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli_module, "resolve_state_file", lambda *_a, **_k: None)
+
+    exit_code = main(
+        [
+            "build",
+            "alpha",
+            "beta",
+            "--repo-root",
+            str(tmp_path),
+            "--registry-user",
+            "ignimutos",
+            "--report-file",
+            str(report_file),
+            "--ignore-failure",
+        ]
+    )
+
+    payload = json.loads(report_file.read_text())
+    assert exit_code == 1
+    assert [entry["image_name"] for entry in payload["entries"]] == ["beta"]
+    assert payload["metadata"]["failures"] == [
+        {
+            "stage": "resolve",
+            "image_name": "alpha",
+            "target_name": "default",
+            "message": "tag lookup failed",
+        }
+    ]
 
 
 def test_build_command_passes_debug_flag(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1989,7 +2143,7 @@ def test_sync_readmes_command_reports_missing_readme(
 
 
 
-def test_send_telegram_command_supports_success_template(
+def test_send_telegram_command_sends_success_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     from tooling.build import cli as cli_module
@@ -2044,7 +2198,7 @@ def test_send_telegram_command_supports_success_template(
             "123:abc",
             "--chat-id",
             "-1001234567890",
-            "--template",
+            "--status",
             "success",
         ]
     )
@@ -2056,14 +2210,14 @@ def test_send_telegram_command_supports_success_template(
         {"bot_token": "123:abc"},
         {
             "chat_id": "-1001234567890",
-            "text": render_summary_telegram_html(build_summary_model(report)),
+            "text": render_build_telegram(report, status="success"),
         },
     ]
     assert "[telegram] sent chat_id=-1001234567890 entries=1" in captured.out
 
 
-def test_send_telegram_command_supports_failure_template(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+def test_send_telegram_command_lists_every_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from tooling.build import cli as cli_module
 
@@ -2072,14 +2226,22 @@ def test_send_telegram_command_supports_failure_template(
             "entries": [],
             "metadata": {
                 "result": "failure",
-                "failure": {
-                    "stage": "build",
-                    "image_name": "tg-signer",
-                    "target_name": "worker",
-                    "message": "docker build failed",
-                    "exit_code": 7,
-                    "command": "docker build ...",
-                },
+                "failures": [
+                    {
+                        "stage": "build",
+                        "image_name": "tg-signer",
+                        "target_name": "worker",
+                        "message": "docker build failed",
+                        "exit_code": 7,
+                        "command": "docker build ...",
+                    },
+                    {
+                        "stage": "resolve",
+                        "image_name": "caddy",
+                        "target_name": "naive",
+                        "message": "tag lookup failed",
+                    },
+                ],
             },
         }
     )
@@ -2108,70 +2270,85 @@ def test_send_telegram_command_supports_failure_template(
             "123:abc",
             "--chat-id",
             "-1001234567890",
-            "--template",
+            "--status",
             "failure",
         ]
     )
 
-    captured = capsys.readouterr()
+    assert exit_code == 0
+    text = sent_messages[1]["text"]
+    assert "Failures: 2" in text
+    assert "tg-signer/worker" in text
+    assert "caddy/naive" in text
+
+
+def test_send_telegram_command_sends_status_only_when_report_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tooling.build import cli as cli_module
+
+    sent_messages: list[dict[str, str]] = []
+
+    class FakeTelegramClient:
+        def __init__(self, *, bot_token: str, transport=None) -> None:
+            sent_messages.append({"bot_token": bot_token})
+
+        def send_message(self, *, chat_id: str, text: str) -> None:
+            sent_messages.append({"chat_id": chat_id, "text": text})
+
+    monkeypatch.setattr(cli_module, "TelegramClient", FakeTelegramClient)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "ignimutos/Containerization")
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+
+    exit_code = main(
+        [
+            "send-telegram",
+            "--report-file",
+            str(tmp_path / "missing.json"),
+            "--bot-token",
+            "123:abc",
+            "--chat-id",
+            "-1001234567890",
+            "--status",
+            "failure",
+        ]
+    )
 
     assert exit_code == 0
     assert sent_messages == [
         {"bot_token": "123:abc"},
         {
             "chat_id": "-1001234567890",
-            "text": render_failure_summary_telegram_html(report),
+            "text": (
+                "<b>Build failure</b>\n"
+                "Report: unavailable\n"
+                "\n"
+                'Run: <a href="https://github.com/ignimutos/Containerization/actions/runs/42">'
+                "https://github.com/ignimutos/Containerization/actions/runs/42</a>"
+            ),
         },
     ]
-    assert "[telegram] sent chat_id=-1001234567890 entries=0" in captured.out
 
 
-
-def test_send_telegram_command_rejects_failure_template_for_success_report(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_send_telegram_command_skips_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     from tooling.build import cli as cli_module
 
-    report = BuildReport.from_dict(
-        {
-            "entries": [],
-            "metadata": {
-                "result": "success",
-            },
-        }
-    )
-    report_file = tmp_path / "reports" / "build-report.json"
-    report_file.parent.mkdir(parents=True)
-    report_file.write_text(json.dumps(report.to_dict()), encoding="utf-8")
-
-    sent_messages: list[dict[str, str]] = []
-
     class FakeTelegramClient:
         def __init__(self, *, bot_token: str, transport=None) -> None:
-            pytest.fail("TelegramClient should not be instantiated for invalid template/report combination")
-
-        def send_message(self, *, chat_id: str, text: str) -> None:
-            sent_messages.append({"chat_id": chat_id, "text": text})
+            pytest.fail("TelegramClient should not be created without credentials")
 
     monkeypatch.setattr(cli_module, "TelegramClient", FakeTelegramClient)
 
-    with pytest.raises(ValueError, match="failure template requires a failure report"):
-        main(
-            [
-                "send-telegram",
-                "--report-file",
-                str(report_file),
-                "--bot-token",
-                "123:abc",
-                "--chat-id",
-                "-1001234567890",
-                "--template",
-                "failure",
-            ]
-        )
+    exit_code = main(
+        ["send-telegram", "--bot-token", "", "--chat-id", ""]
+    )
 
-    assert sent_messages == []
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Telegram not configured, skipping" in captured.out
 
 
 
@@ -2217,12 +2394,12 @@ def test_write_summary_command_prints_telegram_with_explicit_format(tmp_path: Pa
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    expected = render_summary_telegram_html(build_summary_model(report))
+    expected = render_build_telegram(report)
     assert captured.out == expected + "\n"
 
 
 
-def test_write_summary_command_keeps_success_telegram_for_failure_report(
+def test_write_summary_command_prints_failure_telegram_for_failure_report(
     tmp_path: Path,
     capsys,
 ) -> None:
@@ -2231,12 +2408,14 @@ def test_write_summary_command_keeps_success_telegram_for_failure_report(
             "entries": [],
             "metadata": {
                 "result": "failure",
-                "failure": {
-                    "stage": "resolve",
-                    "image_name": "tg-signer",
-                    "target_name": "default",
-                    "message": "resolver exploded",
-                },
+                "failures": [
+                    {
+                        "stage": "resolve",
+                        "image_name": "tg-signer",
+                        "target_name": "default",
+                        "message": "resolver exploded",
+                    }
+                ],
             },
         }
     )
@@ -2257,7 +2436,9 @@ def test_write_summary_command_keeps_success_telegram_for_failure_report(
     captured = capsys.readouterr()
 
     assert exit_code == 0
-    expected = render_summary_telegram_html(build_summary_model(report))
+    expected = render_build_telegram(report)
+    assert "<b>Build failure</b>" in expected
+    assert "tg-signer/default" in expected
     assert captured.out == expected + "\n"
 
 
@@ -2285,7 +2466,7 @@ def test_write_summary_command_prints_both_markdown_and_telegram_in_order(
 
     assert exit_code == 0
     expected_markdown = render_summary_markdown(build_summary_model(report))
-    expected_telegram = render_summary_telegram_html(build_summary_model(report))
+    expected_telegram = render_build_telegram(report)
     assert captured.out == f"{expected_markdown}\n\n{expected_telegram}\n"
 
 
@@ -2364,7 +2545,7 @@ def test_write_summary_command_prints_failure_markdown_and_telegram_for_both(
 
     assert exit_code == 0
     expected_markdown = render_failure_summary_markdown(report)
-    expected_telegram = render_failure_summary_telegram_html(report)
+    expected_telegram = render_build_telegram(report)
     assert captured.out == f"{expected_markdown}\n\n{expected_telegram}\n"
 
 
@@ -2448,6 +2629,9 @@ def test_build_workflow_uses_direct_build_args(tmp_path: Path) -> None:
     assert "INPUT_FORCE" in build_step["env"]
     assert "if [[ \"$INPUT_FORCE\" == 'true' ]]; then" in build_step["run"]
     assert "args+=(--force)" in build_step["run"]
+    assert workflow["env"]["IGNORE_FAILURE"] == "${{ vars.IGNORE_FAILURE || 'true' }}"
+    assert "if [[ \"$IGNORE_FAILURE\" == 'true' ]]; then" in build_step["run"]
+    assert "args+=(--ignore-failure)" in build_step["run"]
     assert "select-targets" not in build_step["run"]
     assert "selection-file" not in build_step["run"]
 
@@ -2463,17 +2647,19 @@ def test_build_workflow_uses_direct_build_args(tmp_path: Path) -> None:
 
     report_guard = "hashFiles('main/.tmp/build-report.json') != ''"
 
-    success_telegram_step = steps_by_name["Send Telegram success summary"]
-    assert success_telegram_step["if"] == f"success() && {report_guard}"
-    assert "python -m tooling.build send-telegram" in success_telegram_step["run"]
-    assert "--report-file \"$BUILD_REPORT_FILE\"" in success_telegram_step["run"]
-    assert "--template success" in success_telegram_step["run"]
+    # One notification step for every outcome. It must run even when the build
+    # failed before the report existed, so it cannot be guarded by the report.
+    assert "Send Telegram success summary" not in steps_by_name
+    assert "Send Telegram failure summary" not in steps_by_name
+    telegram_step = steps_by_name["Send Telegram summary"]
+    assert telegram_step["if"] == "always()"
+    assert telegram_step["env"]["STATUS"] == "${{ job.status }}"
+    assert "python -m tooling.build send-telegram" in telegram_step["run"]
+    assert "--report-file \"$BUILD_REPORT_FILE\"" in telegram_step["run"]
+    assert "--status \"$STATUS\"" in telegram_step["run"]
 
-    failure_telegram_step = steps_by_name["Send Telegram failure summary"]
-    assert failure_telegram_step["if"] == f"failure() && {report_guard}"
-    assert "python -m tooling.build send-telegram" in failure_telegram_step["run"]
-    assert "--report-file \"$BUILD_REPORT_FILE\"" in failure_telegram_step["run"]
-    assert "--template failure" in failure_telegram_step["run"]
+    assert steps_by_name["Sync Docker Hub READMEs"]["if"] == f"always() && {report_guard}"
+    assert steps_by_name["Update version branch state"]["if"] == "always()"
 
     summary_step = steps_by_name["Write build summary"]
     assert summary_step["if"] == f"always() && {report_guard}"

@@ -7,8 +7,8 @@ Claude Code（claude.ai/code）在此仓库工作时看此文件。
 - 自动构建 Docker 镜像。镜像上下文在 `images/`；构建编排在 `tooling/build/`。
 - 唯一入口：`uv run python -m tooling.build ...`，见 `tooling/build/cli.py:81`。
 - 每个镜像事实来源：`images/<name>/config.yml`，见 `tooling/build/config.py:35`、`tooling/build/config.py:51`。
-- 可变构建状态在 `version` 分支 `version.yml`，不在 `main`，见 `tooling/build/state.py:81`、`.github/workflows/build.yml:103`。
-- 无独立 lint；主要验证靠 `pytest` + CLI 冒烟，见 `pyproject.toml:20`、`.github/workflows/build.yml:49`。
+- 可变构建状态在 `version` 分支 `version.yml`, 不在 `main`, 见 `tooling/build/state.py:81`、`.github/workflows/build.yml:59`、`.github/workflows/build.yml:227`。
+- 无独立 lint; 主要验证靠 `pytest` + CLI 冒烟, 见 `pyproject.toml:20`、`.github/workflows/build.yml:127`。
 
 ## 常用命令
 
@@ -36,7 +36,7 @@ uv run python -m tooling.build build tg-signer --repo-root . --registry-user <re
 4. `state.py` 用 `version.yml` 判定跳过 / 重建，见 `tooling/build/state.py:13`。
 5. `docker.py` 生成并执行 `docker build` / `docker buildx build`，见 `tooling/build/docker.py:25`、`tooling/build/docker.py:54`。
 6. `template.py` 用 Jinja2 渲染 `Dockerfile.j2`，见 `tooling/build/template.py:11`。
-7. CI 在 `.github/workflows/build.yml:23` 串起测试、选目标、推送、回写状态。
+7. CI 在 `.github/workflows/build.yml` 的 `build` job (`:49`) 串起测试、选目标、推送、回写状态。
 
 ## 关键约束
 
@@ -51,13 +51,15 @@ uv run python -m tooling.build build tg-signer --repo-root . --registry-user <re
 
 ## CI 事实
 
-- 先 checkout `version`，再 checkout `main`，见 `.github/workflows/build.yml:29`、`.github/workflows/build.yml:35`。
-- 执行顺序：`uv sync --frozen` → `uv run pytest tests/build -q` → 直接调用 `tooling.build build --push`。
+- 先 checkout `version`, 再 checkout `main`, 见 `.github/workflows/build.yml:59`、`.github/workflows/build.yml:78`。
+- 执行顺序: `uv sync --frozen` → `uv run pytest tests/build -q` → 直接调用 `tooling.build build --push` → `sync-readmes` → 单条 Telegram 通知 → `write-summary` → 回写 `version`。
+- `build` 默认带 `--ignore-failure` (`vars.IGNORE_FAILURE`, 默认 `true`) : 单个 target 失败不中止其余 target, 但有失败时退出码仍非 0。见 `tooling/build/cli.py` 的 `_run_builds`。
+- Telegram 通知只有一个 `if: always()` 步骤, `STATUS` 来自 `${{ job.status }}`; 报告文件缺失时退化为状态加 run 链接, 凭据为空时跳过。`sync-readmes` 与回写 `version` 同样是 `always()`, 已成功 target 的状态照常落盘。
 - 凭据默认走 Infisical（OIDC）：配置项是仓库 Variables，经 job 级 `env:` 读取，`project-id` 等由 `Inject secrets from Infisical` 步骤消费；该步骤在 identity/project 为空时跳过，此时（或需要覆盖时）由紧随其后的 `Overlay repo secrets` 步骤从 repo secrets 注入，非空 repo secret 覆盖 Infisical 值。见 `.github/workflows/build.yml` 与 README 对应章节。
-- 只回写 `version` 分支 `version.yml`。
+- 只回写 `version` 分支 `version.yml`; 失败 target 不写入, 下轮自动重试。
 - `version` 分支缺失时 CI 自动创建并写入初始 `{}`；分支已存在但残留旧状态时仍需手工把 `version.yml` 重置成 `{}`。
 - `TARGETS` 非空时，workflow 会把它拆成 `build` 的位置参数；否则 push 事件走 changed-files 选择逻辑。
-- Build 触发路径：`images/**`、`tooling/build/**`、`tests/build/**`、`pyproject.toml`、`uv.lock`；`.github/**` 被排除，见 `.github/workflows/build.yml:7`。
+- Build 触发路径: `images/**`、`tooling/build/**`、`tests/build/**`、`pyproject.toml`、`uv.lock`; `.github/**` 被排除, 见 `.github/workflows/build.yml:20`。
 
 ## 修改时注意
 

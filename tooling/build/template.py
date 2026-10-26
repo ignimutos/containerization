@@ -33,4 +33,9 @@ def render_template(template_path: Path, context: dict[str, Any]) -> str:
     defined_context = {
         name: value for name, value in context.items() if value is not None
     }
-    return template.render(**defined_context)
+    # A broken template is a bad input, not a crash: callers catch ValueError
+    # and report the target as failed.
+    try:
+        return template.render(**defined_context)
+    except jinja2.TemplateError as exc:
+        raise ValueError(f"template render failed: {exc}") from exc

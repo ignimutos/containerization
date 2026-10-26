@@ -85,6 +85,16 @@ uv run python -m tooling.build build +all -caddy:naive --repo-root . --registry-
 uv run python -m tooling.build build tg-signer --repo-root . --registry-user ignimutos --state-file /tmp/containerization-version.yml --push --platform linux/amd64 --force
 ```
 
+## 失败处理
+
+默认在第一个失败的 target 处停止整轮。`--ignore-failure` 改为失败后继续构建其余 target, 跑完再汇总: 
+
+```bash
+uv run python -m tooling.build build caddy tg-signer --repo-root . --registry-user ignimutos --state-file /tmp/containerization-version.yml --force --ignore-failure
+```
+
+版本解析、模板渲染、`docker build` 任一阶段失败都只影响该 target。已经成功的 target 仍会写入状态和报告, 失败的不会。只要有一项失败, 进程退出码仍非 0; CI 默认开启该开关 (`vars.IGNORE_FAILURE`, 默认 `true`) 。
+
 ## 构建日志
 
 默认模式会隐藏 Docker 普通构建输出，只保留流程日志和失败信息：
@@ -176,14 +186,20 @@ CI 流程：
 4. `uv sync --frozen`
 5. `uv run pytest tests/build -q`
 6. 根据手工 targets 或 changed files 直接决定本次应构建的 image/targets
-7. 调用 `uv run python -m tooling.build build ... --push`
-8. 只把构建状态写回 `version` 分支
+7. 调用 `uv run python -m tooling.build build ... --push`, 默认带 `--ignore-failure`
+8. 同步 Docker Hub README (构建失败也执行) 
+9. 发出一条 Telegram 通知 (`if: always()`, 成功和失败都会发) 
+10. 只把构建状态写回 `version` 分支 (已成功的 target 会写入, 失败的不写) 
+
+第 8 到第 10 步失败后仍会执行。Telegram 未配置凭据时跳过通知, 不影响 job 结果。
 
 `version` 分支保存可变构建状态；`main` 不保存这类状态文件。分支缺失时 CI 会以 `{}` 初始化后自行推送，无需手工建分支；若分支已存在但残留旧状态，仍需要手工把 `version.yml` 重置成 `{}`，避免旧状态格式导致错误跳过。
 
 ### CI 密钥：Infisical
 
 CI 用到的真实凭据（Docker Hub 用户名/密码、Telegram bot token/chat id）存放在 Infisical，仓库里只留非敏感的配置标识。workflow 通过 `Infisical/secrets-action` 走 OIDC 鉴权拉取，短时 token、仓库内零长时凭据；未配置 Infisical 时该步骤跳过，改由 repo secrets 注入。
+
+Telegram 的 `TELEGRAM_BOT_TOKEN` 或 `TELEGRAM_CHAT_ID` 为空时, 通知步骤打印跳过并成功退出, fork 不需要为此配置任何东西。
 
 需要配置：
 

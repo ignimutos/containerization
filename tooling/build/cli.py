@@ -6,6 +6,8 @@ import os
 import shutil
 import sys
 import tempfile
+
+import httpx
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,10 +26,10 @@ from .reporting import (
     BuildReportEntry,
     BuildReportState,
     build_summary_model,
+    record_failure,
+    render_build_telegram,
     render_failure_summary_markdown,
-    render_failure_summary_telegram_html,
     render_summary_markdown,
-    render_summary_telegram_html,
 )
 from .resolvers import ResolverService
 from .selection import (
@@ -38,7 +40,7 @@ from .selection import (
     resolved_images,
 )
 from .state import BuildStateStore, resolve_state_file
-from .telegram import TelegramClient
+from .telegram import TelegramClient, split_messages
 from .template import DEFAULT_TEMPLATE, render_template
 
 
@@ -57,6 +59,30 @@ class BuildPlan:
 
 def _display_target_name(target_name: str | None) -> str:
     return target_name or "default"
+
+
+def _run_url() -> str | None:
+    """The Actions run URL, when CI supplies the pieces to build it."""
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+    if not repository or not run_id:
+        return None
+    return f"https://github.com/{repository}/actions/runs/{run_id}"
+
+
+def _as_resolver_error(error: Exception) -> ResolverUserError:
+    """A resolver failure as `ResolverUserError`, whatever the resolver raised.
+
+    Only the GitHub resolver wraps its own errors. A Docker Hub lookup raises
+    `httpx.HTTPStatusError`, and a regex miss raises `ValueError`, so the build
+    loop would otherwise crash instead of recording the target as failed.
+    """
+    if isinstance(error, ResolverUserError):
+        return error
+    return ResolverUserError(
+        reason_code="resolver_error",
+        message=str(error) or error.__class__.__name__,
+    )
 
 
 def _wrap_resolver_error(
@@ -86,7 +112,14 @@ def resolve_target_builds(
     force: bool,
     state_file: Path | None,
     selected_entries: set[tuple[str, str]] | None = None,
+    failures: list[BuildUserError] | None = None,
 ) -> list[BuildPlan]:
+    """Resolve the targets to build.
+
+    `failures` collects resolver errors instead of raising them, so one image
+    whose upstream lookup fails does not stop the rest from building. Callers
+    that pass nothing keep the fail-fast behavior.
+    """
     configs = load_all_configs(repo_root)
     configs_by_name = {item.directory_name: item for item in configs}
     selected = requested_targets or sorted(configs_by_name)
@@ -107,8 +140,14 @@ def resolve_target_builds(
                 loaded.config.version,
                 raw_out=image_raw,
             )
-        except ResolverUserError as exc:
-            raise _wrap_resolver_error(exc, image_name=name, target_name=None) from exc
+        except (ResolverUserError, httpx.HTTPError, ValueError) as exc:
+            wrapped = _wrap_resolver_error(
+                _as_resolver_error(exc), image_name=name, target_name=None
+            )
+            if failures is None:
+                raise wrapped from exc
+            failures.append(wrapped)
+            continue
         targets = loaded.config.targets or [TargetConfig()]
         for target in targets:
             entry_key = (name, target.name or "")
@@ -127,8 +166,14 @@ def resolve_target_builds(
                     target.sha,
                     raw_out=components_raw,
                 )
-            except ResolverUserError as exc:
-                raise _wrap_resolver_error(exc, image_name=name, target_name=target.name) from exc
+            except (ResolverUserError, httpx.HTTPError, ValueError) as exc:
+                wrapped = _wrap_resolver_error(
+                    _as_resolver_error(exc), image_name=name, target_name=target.name
+                )
+                if failures is None:
+                    raise wrapped from exc
+                failures.append(wrapped)
+                continue
             version_raw_source = version_raw if target.version is not None else image_raw
             resolved_target = ResolvedTargetState(
                 image_name=loaded.repo_name,
@@ -516,6 +561,11 @@ def main(argv: list[str] | None = None) -> int:
     build_parser.add_argument("--platform")
     build_parser.add_argument("--report-file", type=Path)
     build_parser.add_argument("--debug", action="store_true")
+    build_parser.add_argument(
+        "--ignore-failure",
+        action="store_true",
+        help="keep building the remaining targets after one fails",
+    )
 
     sync_readmes_parser = subparsers.add_parser("sync-readmes")
     sync_readmes_parser.add_argument("targets", nargs="*")
@@ -526,13 +576,14 @@ def main(argv: list[str] | None = None) -> int:
     sync_readmes_parser.add_argument("--dockerhub-password", required=True)
 
     send_telegram_parser = subparsers.add_parser("send-telegram")
-    send_telegram_parser.add_argument("--report-file", type=Path, required=True)
-    send_telegram_parser.add_argument("--bot-token", required=True)
-    send_telegram_parser.add_argument("--chat-id", required=True)
+    send_telegram_parser.add_argument("--report-file", type=Path)
+    send_telegram_parser.add_argument("--bot-token", default="")
+    send_telegram_parser.add_argument("--chat-id", default="")
     send_telegram_parser.add_argument(
-        "--template",
-        choices=("success", "failure"),
-        default="success",
+        "--status",
+        choices=("success", "failure", "cancelled"),
+        default=None,
+        help="the job status. Defaults to the report's result.",
     )
 
     write_summary_parser = subparsers.add_parser("write-summary")
@@ -652,43 +703,50 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "send-telegram":
-        report = BuildReport.read_json(args.report_file)
-        if args.template == "failure":
-            if report.metadata.get("result") != "failure":
-                raise ValueError("failure template requires a failure report")
-            message = render_failure_summary_telegram_html(report)
-        else:
-            model = build_summary_model(report)
-            message = render_summary_telegram_html(model)
-        TelegramClient(bot_token=args.bot_token).send_message(
-            chat_id=args.chat_id,
-            text=message,
+        # A fork without Telegram configured must not fail the run: the step
+        # that calls this is `if: always()`, so it runs even there.
+        if not args.bot_token or not args.chat_id:
+            print("Telegram not configured, skipping")
+            return 0
+
+        report: BuildReport | None = None
+        if args.report_file is not None and args.report_file.exists():
+            try:
+                report = BuildReport.read_json(args.report_file)
+            except (ValueError, OSError) as exc:
+                # A truncated report must not cost the whole notification: the
+                # status and run link still tell someone the run failed.
+                print(f"[telegram] report unreadable: {exc}", file=sys.stderr)
+                report = None
+
+        message = render_build_telegram(
+            report,
+            status=args.status,
+            run_url=_run_url(),
         )
-        print(f"[telegram] sent chat_id={args.chat_id} entries={len(report.entries)}")
+        client = TelegramClient(bot_token=args.bot_token)
+        for part in split_messages(message):
+            client.send_message(chat_id=args.chat_id, text=part)
+        entries = len(report.entries) if report is not None else 0
+        print(f"[telegram] sent chat_id={args.chat_id} entries={entries}")
         return 0
 
     if args.command == "write-summary":
         report = BuildReport.read_json(args.report_file)
         model = build_summary_model(report)
-        success_markdown = render_summary_markdown(model)
-        success_telegram = render_summary_telegram_html(model)
         is_failure = report.metadata.get("result") == "failure"
         markdown = (
             render_failure_summary_markdown(report)
             if is_failure
-            else success_markdown
+            else render_summary_markdown(model)
         )
+        telegram = render_build_telegram(report)
 
         if args.format == "markdown":
             print(markdown)
         elif args.format == "telegram":
-            print(success_telegram)
+            print(telegram)
         else:
-            telegram = (
-                render_failure_summary_telegram_html(report)
-                if is_failure
-                else success_telegram
-            )
             print(f"{markdown}\n\n{telegram}")
 
         if args.github_step_summary is not None:
@@ -727,6 +785,29 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.changed_file and not args.targets and not selection_entries:
         builds = []
+    elif args.ignore_failure:
+        resolve_failures: list[BuildUserError] = []
+        builds = resolve_target_builds(
+            repo_root=args.repo_root,
+            requested_targets=selection.requested_targets,
+            force=args.force,
+            state_file=actual_state_file,
+            selected_entries=selection_entries,
+            failures=resolve_failures,
+        )
+        for exc in resolve_failures:
+            print(
+                f"[build] resolve failed image={exc.image_name} "
+                f"target={exc.target_name} reason={exc.message}",
+                file=sys.stderr,
+            )
+            record_failure(
+                report,
+                stage="resolve",
+                image_name=exc.image_name,
+                target_name=exc.target_name,
+                message=exc.message,
+            )
     else:
         try:
             builds = resolve_target_builds(
@@ -742,13 +823,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"target={exc.target_name} reason={exc.message}",
                 file=sys.stderr,
             )
-            report.metadata["result"] = "failure"
-            report.metadata["failure"] = {
-                "stage": "resolve",
-                "image_name": exc.image_name,
-                "target_name": exc.target_name,
-                "message": exc.message,
-            }
+            record_failure(
+                report,
+                stage="resolve",
+                image_name=exc.image_name,
+                target_name=exc.target_name,
+                message=exc.message,
+            )
             if args.report_file is not None:
                 report.write_json(args.report_file)
             return 1
@@ -771,6 +852,10 @@ def main(argv: list[str] | None = None) -> int:
         store.save()
     if args.report_file is not None:
         report.write_json(args.report_file)
+    # A resolver failure the run kept going past still makes it a failed run,
+    # so the exit code must not report success.
+    if report.metadata.get("result") == "failure":
+        return failure_exit_code or 1
     return failure_exit_code
 
 
@@ -809,6 +894,7 @@ def _run_builds(
     report: BuildReport,
     rendered_dir: Path,
 ) -> int:
+    continue_on_error: bool = getattr(args, "ignore_failure", False)
     failure_exit_code = 0
     for build in builds:
         target_name = build.target.target_name or "default"
@@ -834,14 +920,17 @@ def _run_builds(
                 f"[build] failed image={build.target.image_name} "
                 f"target={target_name} reason={exc}"
             )
-            report.metadata["result"] = "failure"
-            report.metadata["failure"] = {
-                "stage": "template",
-                "image_name": build.target.image_name,
-                "target_name": target_name,
-                "message": str(exc),
-            }
-            return 1
+            record_failure(
+                report,
+                stage="template",
+                image_name=build.target.image_name,
+                target_name=target_name,
+                message=str(exc),
+            )
+            if not continue_on_error:
+                return 1
+            failure_exit_code = failure_exit_code or 1
+            continue
 
         command = create_build_command(
             f"{args.registry_user}/{build.target.image_name}",
@@ -862,16 +951,18 @@ def _run_builds(
             if exc.output:
                 print("[build] docker output:")
                 print(exc.output, end="" if exc.output.endswith("\n") else "\n")
-            report.metadata["result"] = "failure"
-            report.metadata["failure"] = {
-                "stage": "build",
-                "image_name": build.target.image_name,
-                "target_name": target_name,
-                "message": "docker build failed",
-                "exit_code": exc.returncode,
-                "command": " ".join(exc.command),
-            }
-            failure_exit_code = exc.returncode or 1
+            record_failure(
+                report,
+                stage="build",
+                image_name=build.target.image_name,
+                target_name=target_name,
+                message="docker build failed",
+                exit_code=exc.returncode,
+                command=" ".join(exc.command),
+            )
+            failure_exit_code = failure_exit_code or exc.returncode or 1
+            if continue_on_error:
+                continue
             break
 
         latest_tag, version_tag = image_tags(build.target.target_name, build.target.version)
