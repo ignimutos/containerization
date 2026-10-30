@@ -5,7 +5,7 @@ caddy:
       caddy-dns/cloudflare: a8737d095ad5a48ca031cea6ab704057dbc2d250
       caddyserver/transform-encoder: ba4124974830222da7f12a091cf11ddf4d49363f
       greenpau/caddy-trace: b849748ae8ff2e3a1c2c92b382cdc73f3d94dca0
-      mholt/caddy-l4: 4ad6aec1ccc6711df47ca444d9b5364b79ea3170
+      mholt/caddy-l4: f607ccea1b7dbe61cfcec089f2005621c61f7e6c
       caddyserver/replace-response: 80962887e4c680abfd1b11ce1403fa8cc0fdd3d6
   naive:
     version: 2.11.7
@@ -35,9 +35,9 @@ tg-signer:
     components: {}
 tor2socks:
   default:
-    version: 0.4.9.14-r0
+    version: 0.4.9.15-r0
     components: {}
   obfs:
-    version: 0.4.9.14-r0
+    version: 0.4.9.15-r0
     components:
-      alpine_pkg:package=lyrebird|branch=edge|repository=community: 0.8.1-r6
+      alpine_pkg:package=lyrebird|branch=edge|repository=community: 0.8.1-r7
