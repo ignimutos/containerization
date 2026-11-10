@@ -5,7 +5,7 @@ caddy:
       caddy-dns/cloudflare: a8737d095ad5a48ca031cea6ab704057dbc2d250
       caddyserver/transform-encoder: ba4124974830222da7f12a091cf11ddf4d49363f
       greenpau/caddy-trace: b849748ae8ff2e3a1c2c92b382cdc73f3d94dca0
-      mholt/caddy-l4: 79f151c5dbd8d234398f88027b36bcc3d7597a16
+      mholt/caddy-l4: eafc300ef23bcb2a28cc329a18e1e98bcd2b7cee
       caddyserver/replace-response: 80962887e4c680abfd1b11ce1403fa8cc0fdd3d6
   naive:
     version: 2.11.9
@@ -13,7 +13,7 @@ caddy:
       caddy-dns/cloudflare: a8737d095ad5a48ca031cea6ab704057dbc2d250
       caddyserver/transform-encoder: ba4124974830222da7f12a091cf11ddf4d49363f
       greenpau/caddy-trace: b849748ae8ff2e3a1c2c92b382cdc73f3d94dca0
-      mholt/caddy-l4: 79f151c5dbd8d234398f88027b36bcc3d7597a16
+      mholt/caddy-l4: eafc300ef23bcb2a28cc329a18e1e98bcd2b7cee
       caddyserver/replace-response: 80962887e4c680abfd1b11ce1403fa8cc0fdd3d6
       klzgrad/naiveproxy: 6acbded5dc48d0c5abcb08364c6bcdbf451329b1
 naive-client:
